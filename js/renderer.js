@@ -62,7 +62,7 @@ const vec3 REFLECTION = vec3(0.03, 0.065, 0.13);   // stands in for the sky cube
 const vec3 SKY_EDGE = vec3(0.02, 0.025, 0.035);
 const vec3 SEA_HAZE = vec3(0.10, 0.13, 0.21);      // the game's sea reads as a hazy grey-blue
 const vec3 SHALLOW = vec3(0.22, 0.42, 0.52);       // light rim of shallow water along coasts
-const float LAND_DARKEN = 0.86;                    // the game's land is darker than the raw atlas
+const float LAND_DARKEN = 0.92;                    // the game's land is darker than the raw atlas
 const vec3 RIVER = vec3(0.035, 0.085, 0.16);
 
 vec3 toGamma(vec3 c) { return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
@@ -113,29 +113,6 @@ void resolve(int k0, int k1, int k2, int k3, vec2 f, float scale, out int win, o
   for (int c = 0; c < 4; c++) if (k[c] != k[win] && (second < 0 || F[c] > F[second])) second = c;
   if (second < 0) { dpx = 1e6; return; }
   dpx = (F[win] - F[second]) / max(length(G[win] - G[second]), 1e-4) * scale;
-}
-
-// Distance (device px) from m to the nearest pixel edge where the state changes, at
-// lattice step S. Unlike resolve() this keeps the map's square pixel corners: state lines
-// follow province edges exactly instead of rounding them off.
-int stateKey(ivec2 t) {
-  uvec4 v = info(idAt(t));
-  return v.z == 1u ? int(v.x) : 0;
-}
-float stateEdge(vec2 m, float S, float scale) {
-  vec2 p = m / S;
-  vec2 cell = floor(p), fr = p - cell;
-  int k = stateKey(ivec2((cell + 0.5) * S));
-  if (k == 0) return 1e6;
-  float best = 1e6;
-  for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
-    if (dx == 0 && dy == 0) continue;
-    int n = stateKey(ivec2((cell + vec2(dx, dy) + 0.5) * S));
-    if (n == k || n == 0) continue;
-    vec2 g = vec2(dx < 0 ? fr.x : dx > 0 ? 1.0 - fr.x : 0.0, dy < 0 ? fr.y : dy > 0 ? 1.0 - fr.y : 0.0);
-    best = min(best, (dx != 0 && dy != 0) ? length(g) : max(g.x, g.y));
-  }
-  return best * scale;
 }
 
 // Province lines with rounder corners than resolve(): a cubic B-spline "same province"
@@ -249,10 +226,8 @@ vec3 gradientBorder(vec3 base, vec3 owner, float d, float T, float camDist, floa
   } else {
     float v = 1.0 - a / cutoff;
     fill = 1.0 - clamp(v * (camDist - 0.05) / 0.25, 0.0, 1.0);
-    // The darker inner edge (vThick): the game's values just below the cutoff
-    // (vFullWidth 5.25 / 255, vGradientWidth 0.5 / 255).
-    float lo = cutoff - 5.25 / 255.0;
-    thick = smoothstep(0.0, 1.0, clamp((a - lo) / (0.5 / 255.0), 0.0, 1.0));
+    // (The game's vThick just inside the cutoff would draw a second dark line 2 map px in;
+    // its dark edge reads as being on the border, which the strip above does.)
   }
   float k = max(max(fill, outline), thick);
   vec3 c = mix(base, owner, k);
@@ -347,7 +322,7 @@ void main() {
     ownerCol = toLinear(oc.rgb);
     // The game's political colours read muted and darker than the raw country colours
     // (its post-processing and haze); take some saturation and light out.
-    ownerCol = mix(vec3(dot(ownerCol, vec3(0.2126, 0.7152, 0.0722))), ownerCol, 0.72) * 0.78;
+    ownerCol = mix(vec3(dot(ownerCol, vec3(0.2126, 0.7152, 0.0722))), ownerCol, 0.85) * 0.88;
     T = oc.a * 255.0;  // 5-25 map px by country size, as in the game
   }
   vec3 landCol = diffuse;
@@ -409,33 +384,27 @@ void main() {
   float provFade = 1.0 - smoothstep(200.0, 300.0, uCamH);   // PROVINCE_BORDER_FADE_NEAR/FAR
   float stateFade = 1.0 - smoothstep(400.0, 500.0, uCamH);  // STATE_BORDER_FADE_NEAR/FAR
   vec4 b;
-  if (provFade > 0.0) {
+  {
+    // Province, state and sea-zone lines all follow the same rounded province boundary,
+    // so state lines don't step along the pixel grid next to smooth province lines.
     int rw, rs, rwi, rsi;
     float rd;
     resolveRound(m, S, scale, 0, rw, rs, rwi, rsi, rd);
     if (rs >= 0) {
-      uint tw = info(rw).z, ts = info(rs).z;
-      if (tw == 1u && ts == 1u) {
-        b = strip(2.0, rd, 2.5 * uDpr, m);
-        col = mix(col, b.rgb, b.a * provFade);
+      uvec4 iw = info(rw), is_ = info(rs);
+      if (iw.z == 1u && is_.z == 1u) {
+        if (iw.x != is_.x) {
+          b = strip(1.0, rd, 2.0 * uDpr, m);
+          col = mix(col, b.rgb, b.a * max(stateFade, provFade));
+        } else {
+          b = strip(2.0, rd, 2.5 * uDpr, m);
+          col = mix(col, b.rgb, b.a * provFade);
+        }
+      } else if (iw.z == 2u && is_.z == 2u) {
+        // Sea-zone borders stay when zoomed out, as in the game.
+        b = strip(3.0, rd, 1.5 * uDpr, m);
+        col = mix(col, b.rgb, b.a * 0.55);
       }
-    }
-  }
-  {
-    // Sea-zone borders stay when zoomed out, as in the game.
-    int rw, rs, rwi, rsi;
-    float rd;
-    resolveRound(m, S, scale, 0, rw, rs, rwi, rsi, rd);
-    if (rs >= 0 && info(rw).z == 2u && info(rs).z == 2u) {
-      b = strip(3.0, rd, 1.5 * uDpr, m);
-      col = mix(col, b.rgb, b.a * 0.55);
-    }
-  }
-  if (stateFade > 0.0) {
-    float se = stateEdge(m, S, scale);
-    if (se < 1e5) {
-      b = strip(1.0, se, 2.0 * uDpr, m);
-      col = mix(col, b.rgb, b.a * stateFade);
     }
   }
   if (ws >= 0 && ok[ww] != 0 && ok[ws] != 0) {
