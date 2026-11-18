@@ -1,7 +1,7 @@
 // Map labels on a 2D canvas over the WebGL map.
 //
-// Country names use the game's own map font (gfx/fonts/hoi_mapfont4: Tahoma bold; drawn as
-// light letters with a dark outline, as the game shows them) and show only while the camera is high enough
+// Country names use the game's own map font (gfx/fonts/hoi_mapfont4: Tahoma bold, dark letters
+// with a white outline) and show only while the camera is high enough
 // (DRAW_COUNTRY_NAMES_CUTOFF = 260). When connected, hoi4link sends the game's own layout
 // (state key map_names: every glyph's texture rectangle and where the game put it), and the
 // names are drawn exactly there. Offline they are spread along a curve fitted to each
@@ -210,10 +210,11 @@ class MapFont {
     this.height = h;
     const rgba = new Uint8ClampedArray(w * h * 4);
     for (let i = 0, j = 0; i < w * h; i++, j += 2) {
-      // The atlas has dark letters with a light rim; the game shows names light with a
-      // dark outline, so draw it inverted.
-      rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = Math.round(30 + (255 - data[j]) * 0.82);
-      rgba[i * 4 + 3] = data[j + 1];
+      // The atlas: dark letters (alpha ~0.55) with a faint light rim (alpha <= ~0.37).
+      // Dark grey letters with a solid white outline: push both apart and make them opaque.
+      const v = data[j];
+      rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = v < 100 ? 38 : v > 180 ? 250 : Math.round(38 + (v - 100) * 2.65);
+      rgba[i * 4 + 3] = Math.min(255, Math.round(data[j + 1] * 2.2));
     }
     const full = await createImageBitmap(new ImageData(rgba, w, h), { premultiplyAlpha: "premultiply" });
     this.atlases = [{ image: full, scale: 1 }];
