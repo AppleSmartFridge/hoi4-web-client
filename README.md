@@ -15,13 +15,14 @@ This repository holds only the page (HTML, CSS and JavaScript). It contains **no
    It copies the result to `<game>\hoi4link\mapdata`, where the game sends it from.
 2. Start HOI4 and open the page.
 3. **On the game's PC:** connect to `ws://127.0.0.1:8787` with the token from `<game>\hoi4link\config.json`.
-4. **Friends:** the page is served over https, so browsers only let it reach another PC over `wss://`. On the game's PC, with Tailscale installed and signed in, run
+4. **Friends:** the page is served over https, so it can only reach another PC at a `wss://` address. On the game's PC, run the HOI4WebClient project's tunnel script (it uses Cloudflare's free quick tunnels: no account, no router changes):
    ```
-   tailscale serve --bg 8787
+   powershell -ExecutionPolicy Bypass -File scripts\tunnel.ps1
    ```
-   and give friends `wss://<pc-name>.<tailnet>.ts.net` plus the token. Only people on your tailnet can reach it.
+   It prints an address like `wss://some-random-words.trycloudflare.com`. Give friends that address plus the token, and keep the window open while they play. The address changes every time you start the tunnel.
+   Anyone who learns the address can reach the sign-in, so the token is what keeps them out. hoi4link locks out a visitor after 5 wrong tokens in a minute. Already use Tailscale? `tailscale serve --bg 8787` gives your tailnet a `wss://<pc>.<tailnet>.ts.net` address instead.
 
-The first time you connect, Chrome and Edge ask whether this site may access devices on your local network: choose **Allow**. If you refused it once, allow it again from the icon left of the address bar → Site settings → Local network access.
+When you connect to `ws://127.0.0.1` on the game's PC, Chrome and Edge ask whether this site may access devices on your local network: choose **Allow**. If you refused it once, allow it again from the icon left of the address bar → Site settings → Local network access.
 
 The token controls your game: share it like a password. To revoke it, delete the `token` line in `config.json` and restart the game.
 

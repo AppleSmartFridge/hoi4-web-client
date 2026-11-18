@@ -84,7 +84,7 @@ export class Link extends EventTarget {
       const insecure = location.protocol === "https:" && /^ws:\/\//i.test(this.url) &&
         !/^ws:\/\/(127\.|localhost[:/]|\[::1\])/i.test(this.url);
       this.setStatus("error", insecure
-        ? "This page is served over https, so it can reach a game on another PC only at a wss:// address (tailscale serve gives the game's PC one). ws://127.0.0.1 works on the game's own PC."
+        ? "This page is served over https, so it can reach a game on another PC only at a wss:// address (scripts\\tunnel.ps1 on the game's PC prints one). ws://127.0.0.1 works on the game's own PC."
         : String(e.message || e));
       return;
     }
