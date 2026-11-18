@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HOI4 Link</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!--
+  hoi4link web client (P7). The map view: political map with country colours and names,
+  states, provinces and live ownership from the game over hoi4link's WebSocket.
+  Map data comes from your own game files: python tools/mapgen/build_map.py
+-->
+<div id="stage">
+  <canvas id="map"></canvas>
+  <canvas id="labels"></canvas>
+</div>
+
+<header class="bar">
+  <div class="brand">HOI4 Link</div>
+  <button id="linkChip" class="chip" title="Connection to the game">
+    <span class="dot"></span><span id="linkText">Offline · 1936 borders</span>
+  </button>
+  <span id="date" class="date"></span>
+</header>
+
+<div id="tooltip" class="tooltip" hidden></div>
+
+<aside id="statePanel" class="panel state-panel" hidden>
+  <button class="close" id="stateClose" aria-label="Close">×</button>
+  <div class="swatch" id="stateSwatch"></div>
+  <h2 id="stateName"></h2>
+  <dl id="stateFacts"></dl>
+</aside>
+
+<nav class="mapctl" aria-label="Map controls">
+  <button id="zoomIn" title="Zoom in (E, +, wheel)">+</button>
+  <button id="zoomOut" title="Zoom out (Q, −, wheel)">−</button>
+  <button id="home" title="Back to your country (Home)">⌂</button>
+  <button id="settingsBtn" title="Map settings">⚙</button>
+</nav>
+
+<div id="settings" class="panel settings" hidden>
+  <h2>Map</h2>
+  <label><input type="checkbox" id="optCountryNames" checked> Country names</label>
+  <label><input type="checkbox" id="optStateNames"> State names</label>
+  <label><input type="checkbox" id="optEdge"> Edge scrolling</label>
+  <label class="range">Camera smoothing <input type="range" id="optSmooth" min="0" max="100" value="50"></label>
+  <p class="hint">Drag to pan · wheel or pinch to zoom · WASD/arrows to pan (Shift: faster) · Q/E to zoom · double-click to zoom in · click a state to select it</p>
+</div>
+
+<div id="connect" class="panel connect" hidden>
+  <h2>Connect to the game</h2>
+  <p class="hint">Live borders come from HOI4 through hoi4link. The token is in <code>&lt;game&gt;\hoi4link\config.json</code>; treat it like a password.</p>
+  <label>Server <input id="wsUrl" spellcheck="false"></label>
+  <label>Token <input id="wsToken" type="password" spellcheck="false" autocomplete="off"></label>
+  <label class="check"><input type="checkbox" id="wsRemember"> Remember on this device</label>
+  <p id="connectError" class="error" hidden></p>
+  <div class="row">
+    <button id="wsGo" class="primary">Connect</button>
+    <button id="wsStop">Disconnect</button>
+    <button id="wsClose">Close</button>
+  </div>
+</div>
+
+<div id="loading" class="loading">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <p id="loadingText">Loading…</p>
+  </div>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
