@@ -224,10 +224,9 @@ float camDistance(float lo, float hi) { return (clamp(uCamH, lo, hi) - lo) / (hi
 // The game's gradient-border texture value at distance d (map px) from the owner's edge:
 // 255, 254, 253 over the first two pixels (GRADIENT_BORDERS_COUNTRY_CENTER_THICKNESS), then
 // falling from below the outline cutoff to 0 across the band thickness T.
-// The solid edge band is kept to about 2.5 device px so country edges don't get heavy
-// when zoomed in (in the game it scales with the map).
+// Everything is in map px, so the band scales with the map as in the game.
 float gbAlpha(float d, float T) {
-  float c = min(2.0, 2.5 * uDpr / max(uZoom, 1e-3));
+  const float c = 2.0;
   if (d < c) return (255.0 - 2.0 * d / c) / 255.0;
   return 247.0 / 255.0 * clamp(1.0 - (d - c) / max(T - c, 1.0), 0.0, 1.0);
 }
@@ -238,16 +237,19 @@ vec3 gradientBorder(vec3 base, vec3 owner, float d, float T, float camDist, floa
   float a = gbAlpha(d, T);
   float fill, outline = 0.0, thick = 0.0;
   if (a >= cutoff) {
-    outline = (1.0 - (a - cutoff) / (1.0 - cutoff)) * outlineMult;
+    // The edge strip (first 2 map px): full colour, its outer part darkened, which is how
+    // the game's borders read (its 9-tap sampling pulls the edge texels under the cutoff).
+    outline = outlineMult;
     fill = 0.0;
+    float w = max(0.75, 1.5 / max(uZoom, 1e-3));                   // map px, at least ~1.5 device px
+    thick = outlineMult * (1.0 - clamp((d - w) * uZoom + 0.5, 0.0, 1.0));  // antialiased over a device px
   } else {
     float v = 1.0 - a / cutoff;
     fill = 1.0 - clamp(v * (camDist - 0.05) / 0.25, 0.0, 1.0);
-    // The darker inner edge (vThick): a thin band just inside the cutoff. Its exact place
-    // is under a pixel wide in the game's texture; keep it at least a device pixel.
-    float dpx = (d - 2.0) * uZoom;
-    float half_ = max(0.55, 0.45 * uZoom);
-    thick = (1.0 - smoothstep(half_ - 0.5, half_ + 0.5, abs(dpx - half_))) * smoothstep(0.25, 0.9, uZoom);
+    // The darker inner edge (vThick): the game's values just below the cutoff
+    // (vFullWidth 5.25 / 255, vGradientWidth 0.5 / 255).
+    float lo = cutoff - 5.25 / 255.0;
+    thick = smoothstep(0.0, 1.0, clamp((a - lo) / (0.5 / 255.0), 0.0, 1.0));
   }
   float k = max(max(fill, outline), thick);
   vec3 c = mix(base, owner, k);
@@ -340,9 +342,7 @@ void main() {
   if (owner > 0) {
     vec4 oc = texelFetch(uColors, ivec2(owner, 0), 0);
     ownerCol = toLinear(oc.rgb);
-    // The band is 5-25 map px in the game, which gets heavy zoomed in: keep it within
-    // about 20 device px there.
-    T = min(oc.a * 255.0, max(3.0, 20.0 * uDpr / max(uZoom, 1e-3)));
+    T = oc.a * 255.0;  // 5-25 map px by country size, as in the game
   }
   vec3 landCol = diffuse;
   float fillStrength = 0.0;
