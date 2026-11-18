@@ -1,3 +1,12 @@
+// The view is a perspective camera looking down at the map, tilting north-up as it comes
+// closer like the game's (flat from far away, TILT_MAX near the ground). zoom is CSS px per
+// map texel at the screen centre; with no tilt, flat ground maps exactly as a top-down view.
+// Heights (heightAt, set by the app) only move what is on the ground; the camera keeps the
+// sea-level plane as its reference.
+const FOV = (40 * Math.PI) / 180;     // vertical field of view
+const TILT_MAX = 0.8;                 // radians from straight down (~46 degrees)
+const TILT_FAR = 500, TILT_NEAR = 60; // camera heights where tilting starts and is complete
+
 // Camera with smoothing: input moves a target; the visible camera eases towards it
 // (exponential, zoom in log space so zooming feels even). Drags follow the pointer
 // directly and keep their momentum when released. The map wraps east-west.
@@ -20,6 +29,31 @@ export class Camera {
   // Calibrated against the game: a view of Europe there is past the province-line fade.
   get height() { return (1.25 * this.view.h) / this.zoom; }
 
+  // Tilt (radians from straight down) for a zoom level.
+  tiltFor(zoom) {
+    const h = (1.25 * this.view.h) / zoom;
+    const t = Math.min(1, Math.max(0, (TILT_FAR - h) / (TILT_FAR - TILT_NEAR)));
+    return TILT_MAX * t * t * (3 - 2 * t);
+  }
+  get tilt() { return this.tiltFor(this.zoom); }
+
+  // Camera frame in map units for a target point and zoom: position C, forward and up
+  // vectors (screen right is always +x), focal length f in CSS px.
+  frame(x = this.x, y = this.y, zoom = this.zoom) {
+    const f = this.view.h / 2 / Math.tan(FOV / 2);
+    const D = f / zoom, t = this.tiltFor(zoom), s = Math.sin(t), c = Math.cos(t);
+    return { f, C: [x, y + D * s, D * c], fwd: [0, -s, -c], up: [0, -c, s] };
+  }
+
+  // Where the ray through screen point (sx, sy) meets height z, for a frame.
+  static ground(fr, view, sx, sy, z = 0) {
+    const dx = sx - view.w / 2, dy = sy - view.h / 2;
+    const d = [dx, fr.fwd[1] * fr.f - fr.up[1] * dy, fr.fwd[2] * fr.f - fr.up[2] * dy];
+    if (d[2] >= -1e-6) return null;  // above the horizon
+    const k = (z - fr.C[2]) / d[2];
+    return { x: fr.C[0] + k * d[0], y: fr.C[1] + k * d[1] };
+  }
+
   get minZoom() { return Math.max(this.view.h / this.H, 0.05); }
 
   resize(w, h) {
@@ -37,20 +71,42 @@ export class Camera {
   }
 
   // Screen (CSS px, from the top-left of the view) -> map texels, using the visible camera.
+  // On the terrain when heightAt is set (a few fixed-point steps), else at sea level.
   toMap(sx, sy) {
-    return { x: this.x + (sx - this.view.w / 2) / this.zoom, y: this.y + (sy - this.view.h / 2) / this.zoom };
+    const fr = this.frame();
+    let p = Camera.ground(fr, this.view, sx, sy, 0);
+    if (!p) return { x: NaN, y: NaN };
+    if (this.heightAt) {
+      for (let i = 0; i < 4; i++) {
+        const q = Camera.ground(fr, this.view, sx, sy, this.heightAt(p.x, p.y));
+        if (!q) break;
+        p = q;
+      }
+    }
+    return p;
   }
-  toScreen(mx, my) {
-    return { x: (mx - this.x) * this.zoom + this.view.w / 2, y: (my - this.y) * this.zoom + this.view.h / 2 };
+  toScreen(mx, my, z = 0) {
+    const fr = this.frame();
+    const v = [mx - fr.C[0], my - fr.C[1], z - fr.C[2]];
+    const depth = v[1] * fr.fwd[1] + v[2] * fr.fwd[2];
+    const up = v[1] * fr.up[1] + v[2] * fr.up[2];
+    const k = fr.f / Math.max(depth, 1e-3);
+    return { x: this.view.w / 2 + v[0] * k, y: this.view.h / 2 - up * k };
+  }
+  // Ground point under a screen point relative to the target, for a target-free frame.
+  offsetAt(zoom, sx, sy) {
+    const p = Camera.ground(this.frame(0, 0, zoom), this.view, sx, sy, 0);
+    return p || { x: (sx - this.view.w / 2) / zoom, y: (sy - this.view.h / 2) / zoom };
   }
 
   // Zoom by a factor keeping the map point under (sx, sy) fixed (in the target camera).
   zoomAt(factor, sx, sy) {
-    const mx = this.tx + (sx - this.view.w / 2) / this.tz;
-    const my = this.ty + (sy - this.view.h / 2) / this.tz;
+    const a = this.offsetAt(this.tz, sx, sy);
+    const mx = this.tx + a.x, my = this.ty + a.y;
     this.tz = this.clampZoom(this.tz * factor);
-    this.tx = mx - (sx - this.view.w / 2) / this.tz;
-    this.ty = my - (sy - this.view.h / 2) / this.tz;
+    const b = this.offsetAt(this.tz, sx, sy);
+    this.tx = mx - b.x;
+    this.ty = my - b.y;
     this.clampTarget();
   }
 
@@ -63,8 +119,12 @@ export class Camera {
 
   // Direct manipulation while dragging: both cameras move together, no easing.
   dragBy(dx, dy) {
-    this.x -= dx / this.zoom; this.tx -= dx / this.zoom;
-    this.y -= dy / this.zoom; this.ty -= dy / this.zoom;
+    // Ground distance under the screen centre, so a tilted view drags at the right speed.
+    const cx = this.view.w / 2, cy = this.view.h / 2;
+    const a = this.offsetAt(this.zoom, cx, cy), b = this.offsetAt(this.zoom, cx + dx, cy + dy);
+    const mx = b.x - a.x, my = b.y - a.y;
+    this.x -= mx; this.tx -= mx;
+    this.y -= my; this.ty -= my;
     const before = this.ty;
     this.clampTarget();
     this.y += this.ty - before;  // stop at the top and bottom edges without lag

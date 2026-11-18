@@ -70,6 +70,14 @@ async function main() {
   const labels = new Labels(labelCanvas, map);
   labels.font.onready = () => { dirty = true; };
   const cam = new Camera(map.width, map.height);
+  {
+    // Picking lands on the terrain, matching the shader's relief().
+    const H = map.look.layers.height, sx = H.w / map.width, sy = H.h / map.height;
+    cam.heightAt = (x, y) => {
+      const ix = ((Math.floor(x * sx) % H.w) + H.w) % H.w, iy = Math.min(H.h - 1, Math.max(0, Math.floor(y * sy)));
+      return Math.max(H.data[iy * H.w + ix] / 10 - 9.5, 0) * renderer.relief;
+    };
+  }
   let dirty = true;
   let dpr = 1;
   let hover = null;      // {province, state, owner, x, y}

@@ -45,8 +45,12 @@ uniform sampler2DArray uAtlasN;  // their normals
 uniform sampler2DArray uBorder;  // border strips: country, state, province, sea, wasteland
 uniform vec2 uMap;            // map size in texels
 uniform vec2 uView;           // viewport in device pixels
-uniform vec2 uCenter;         // camera centre in map texels
-uniform float uZoom;          // device pixels per texel
+uniform vec3 uCam;            // camera position (map texels; z up)
+uniform vec3 uFwd;            // view direction; screen right is +x
+uniform vec3 uUp;             // screen up
+uniform float uFocal;         // focal length in device pixels
+uniform float uRelief;        // height-map scale (game units: value / 10 above the 9.5 sea level)
+float uZoom;                  // device pixels per texel where this pixel lands (set in main)
 uniform float uDpr;
 uniform float uCamH;          // camera height in game units (50 near ... 3000 far)
 uniform int uHoverState;
@@ -241,9 +245,48 @@ vec3 gradientBorder(vec3 base, vec3 owner, float d, float T, float camDist, floa
   return mix(base, c, opacity);
 }
 
+// Ground height above sea level at a map point (the land is a mesh over the height map in
+// the game; sea and anything below it sit at the water's level).
+float relief(vec2 xy) {
+  float h = texture(uHeight, vec2(fract(xy.x / uMap.x), xy.y / uMap.y)).r * 25.5;
+  return max(h - 9.5, 0.0) * uRelief;
+}
+
 void main() {
   vec2 frag = vec2(gl_FragCoord.x, uView.y - gl_FragCoord.y);
-  vec2 m = uCenter + (frag - 0.5 * uView) / uZoom;
+  vec2 dd = frag - 0.5 * uView;
+  vec3 dir = uFwd * uFocal + vec3(dd.x, 0.0, 0.0) - uUp * dd.y;
+  if (dir.z > -1e-4) { outColor = vec4(SKY_EDGE, 1.0); return; }
+  // Sea level first: gives the local scale for line widths. Then march down the ray from
+  // the highest possible ground to sea level and refine the first hit.
+  float k0 = -uCam.z / dir.z;
+  vec3 g0 = uCam + k0 * dir;
+  uZoom = uFocal / max(dot(g0 - uCam, uFwd), 1e-3);
+  vec2 m = g0.xy;
+  if (uRelief > 0.0) {
+    float top = 16.0 * uRelief;
+    float kTop = (top - uCam.z) / dir.z;
+    float span = length((kTop - k0) * dir.xy);                  // texels crossed
+    int n = int(clamp(span * 0.75, 1.0, 64.0));
+    float kPrev = kTop, kHit = k0;
+    for (int i = 1; i <= 64; i++) {
+      if (i > n) break;
+      float k = mix(kTop, k0, float(i) / float(n));
+      vec3 P = uCam + k * dir;
+      if (P.z <= relief(P.xy)) {
+        float a = kPrev, b = k;
+        for (int j = 0; j < 6; j++) {
+          float mid = 0.5 * (a + b);
+          vec3 Q = uCam + mid * dir;
+          if (Q.z <= relief(Q.xy)) b = mid; else a = mid;
+        }
+        kHit = b;
+        break;
+      }
+      kPrev = k;
+    }
+    m = (uCam + kHit * dir).xy;
+  }
   if (m.y < 0.0 || m.y >= uMap.y) {
     outColor = vec4(SKY_EDGE, 1.0);
     return;
@@ -449,7 +492,7 @@ void main() {
 }`;
 
 const UNIFORMS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uLand", "uWater", "uUnder",
-  "uRiver", "uAtlas", "uAtlasN", "uBorder", "uMap", "uView", "uCenter", "uZoom", "uDpr", "uCamH", "uHoverState", "uSelState", "uHoverProv"];
+  "uRiver", "uAtlas", "uAtlasN", "uBorder", "uMap", "uView", "uCam", "uFwd", "uUp", "uFocal", "uRelief", "uDpr", "uCamH", "uHoverState", "uSelState", "uHoverProv"];
 const SAMPLERS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uLand", "uWater", "uUnder",
   "uRiver", "uAtlas", "uAtlasN", "uBorder"];
 const BORDERS = ["border_country", "border_state", "border_province", "border_sea", "border_impassable"];
@@ -503,6 +546,7 @@ export class MapRenderer {
     this.hoverState = -1;
     this.selState = -1;
     this.hoverProv = -1;
+    this.relief = 1.0;  // height-map scale; 0 draws the map flat
   }
 
   // Re-uploads the lookup tables and the border field when ownership changed.
@@ -548,8 +592,12 @@ export class MapRenderer {
     });
     gl.uniform2f(this.loc.uMap, this.map.width, this.map.height);
     gl.uniform2f(this.loc.uView, c.width, c.height);
-    gl.uniform2f(this.loc.uCenter, camera.x, camera.y);
-    gl.uniform1f(this.loc.uZoom, camera.zoom * dpr);
+    const fr = camera.frame();
+    gl.uniform3f(this.loc.uCam, fr.C[0], fr.C[1], fr.C[2]);
+    gl.uniform3f(this.loc.uFwd, fr.fwd[0], fr.fwd[1], fr.fwd[2]);
+    gl.uniform3f(this.loc.uUp, fr.up[0], fr.up[1], fr.up[2]);
+    gl.uniform1f(this.loc.uFocal, fr.f * dpr);
+    gl.uniform1f(this.loc.uRelief, this.relief);
     gl.uniform1f(this.loc.uDpr, dpr);
     gl.uniform1f(this.loc.uCamH, camera.height);
     gl.uniform1i(this.loc.uHoverState, this.hoverState);
