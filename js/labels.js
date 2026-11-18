@@ -1,9 +1,11 @@
 // Map labels on a 2D canvas over the WebGL map.
 //
 // Country names use the game's own map font (gfx/fonts/hoi_mapfont4: Tahoma bold drawn as
-// dark letters with a faint light rim), upper case, spread along a curve fitted to each
-// country's shape like the game does, and shown only while the camera is high enough
-// (DRAW_COUNTRY_NAMES_CUTOFF = 260). State names (optional) appear when zoomed in.
+// dark letters with a faint light rim) and show only while the camera is high enough
+// (DRAW_COUNTRY_NAMES_CUTOFF = 260). When connected, hoi4link sends the game's own layout
+// (state key map_names: every glyph's texture rectangle and where the game put it), and the
+// names are drawn exactly there. Offline they are spread along a curve fitted to each
+// country's shape instead. State names (optional) appear when zoomed in.
 
 const STATE_FONT = 'system-ui, "Segoe UI", sans-serif';
 const NAME_CUTOFF = 260;  // camera height below which the game stops drawing country names
@@ -17,6 +19,35 @@ export class Labels {
     this.showCountries = true;
     this.showStates = false;
     this.font = new MapFont(map.look.font, map.look.layers.mapfont);
+    this.gameNames = null;  // the game's layout, from setGameNames
+  }
+
+  // map_names from hoi4link: {names: [{text, province, glyphs: [[u0,v0,u1,v1, ax,az, bx,bz, cx,cz]]}]}.
+  // World z counts rows from the bottom; the client's y from the top. Returns true if changed.
+  setGameNames(mn) {
+    const list = mn && Array.isArray(mn.names) ? mn.names : null;
+    if (!list || !list.length) {
+      const had = this.gameNames !== null;
+      this.gameNames = null;
+      return had;
+    }
+    const H = this.map.height;
+    this.gameNames = list.map((n) => {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      const glyphs = n.glyphs.map((g) => {
+        const q = [g[0], g[1], g[2], g[3], g[4], H - g[5], g[6], H - g[7], g[8], H - g[9]];
+        const dx = q[6] - q[4], dy = q[7] - q[5];
+        for (const [x, y] of [[q[4], q[5]], [q[6], q[7]], [q[8], q[9]], [q[8] + dx, q[9] + dy]]) {
+          x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        }
+        return q;
+      });
+      // Letter height in map units: the glyph's extent along v.
+      const g0 = glyphs[0];
+      const size = g0 ? Math.hypot(g0[8] - g0[4], g0[9] - g0[5]) : 0;
+      return { text: n.text, glyphs, x0, x1, y0, y1, size };
+    });
+    return true;
   }
 
   rebuild() {
@@ -57,7 +88,18 @@ export class Labels {
 
     const h = cam.height;
     const show = smooth(NAME_CUTOFF - 20, NAME_CUTOFF + 20, h);
-    if (this.showCountries && show > 0.01 && this.font.ready) {
+    if (this.showCountries && show > 0.01 && this.font.ready && this.gameNames) {
+      for (const n of this.gameNames) {
+        const alpha = show * smooth(3, 6, n.size * cam.zoom);
+        if (alpha <= 0.01) continue;
+        const top = cam.toScreen(0, n.y0).y, bottom = cam.toScreen(0, n.y1).y;
+        if (bottom < -50 || top > view.h + 50) continue;
+        for (const off of [-W, 0, W]) {
+          const l = cam.toScreen(n.x0 + off, 0).x, r = cam.toScreen(n.x1 + off, 0).x;
+          if (r > -50 && l < view.w + 50) this.drawGameName(n, cam, off, dpr, alpha);
+        }
+      }
+    } else if (this.showCountries && show > 0.01 && this.font.ready) {
       for (const l of this.countries) {
         const px = l.size * cam.zoom;
         const alpha = show * smooth(4, 7, px);
@@ -96,6 +138,24 @@ export class Labels {
       }
     }
     ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  // Each glyph: the atlas rectangle (u0,v0)-(u1,v1) mapped onto the parallelogram whose
+  // corners a, b, c the game computed; one affine transform per glyph.
+  drawGameName(n, cam, off, dpr, alpha) {
+    const ctx = this.ctx, font = this.font;
+    const px = n.size * cam.zoom * dpr;  // device px per letter height
+    const atlas = font.atlasFor(px / font.size);
+    const W = font.width * atlas.scale, H = font.height * atlas.scale;
+    ctx.globalAlpha = alpha;
+    for (const q of n.glyphs) {
+      const a = cam.toScreen(q[4] + off, q[5]);
+      const b = cam.toScreen(q[6] + off, q[7]);
+      const c = cam.toScreen(q[8] + off, q[9]);
+      ctx.setTransform((b.x - a.x) * dpr, (b.y - a.y) * dpr, (c.x - a.x) * dpr, (c.y - a.y) * dpr, a.x * dpr, a.y * dpr);
+      ctx.drawImage(atlas.image, q[0] * W, q[1] * H, (q[2] - q[0]) * W, (q[3] - q[1]) * H, 0, 0, 1, 1);
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
@@ -146,6 +206,8 @@ class MapFont {
 
   async load(layer) {
     const { w, h, data } = layer;
+    this.width = w;
+    this.height = h;
     const rgba = new Uint8ClampedArray(w * h * 4);
     for (let i = 0, j = 0; i < w * h; i++, j += 2) {
       rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = data[j];

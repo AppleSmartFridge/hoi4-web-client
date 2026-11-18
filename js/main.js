@@ -200,6 +200,8 @@ async function main() {
     if (changed.includes("countries") && state.countries && typeof state.countries === "object") {
       if (map.setLooks(state.countries)) { dirty = true; renderStatePanel(); }
     }
+    // The game's own country-name layout (glyph by glyph); null falls back to fitted labels.
+    if (changed.includes("map_names") && labels.setGameNames(state.map_names)) dirty = true;
     if (!flewHome && state.country?.tag) { flewHome = true; home(); }
   }
   link.addEventListener("state", (e) => onState(e.detail.state, e.detail.changed));
