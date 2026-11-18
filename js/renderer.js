@@ -396,16 +396,8 @@ void main() {
   else if (st >= 0 && st == uHoverState) landCol = mix(landCol, vec3(1.0), 0.10);
   if (c[pw] == uHoverProv && uCamH < 300.0 && land) landCol = mix(landCol, vec3(1.0), 0.06);
 
-  // Rivers: rivers.bmp lines, smoothed by linear filtering, wider for bigger rivers.
-  // Coverage sampled with a B-spline so wide rivers up close are smooth, not blocky.
-  vec2 rv = vec2(textureBicubic(uRiver, uv, uMap), texture(uRiver, uv).g);
-  if (rv.r > 0.02 && land) {
-    float halfW = (0.28 + 0.07 * rv.g * 9.0) * uZoom;            // device px
-    float dpx = (1.0 - rv.r) * uZoom;                              // distance from the line
-    float a = 1.0 - smoothstep(max(halfW, 0.5) - 0.5, max(halfW, 0.5) + 0.5, dpx);
-    a *= clamp(halfW * 1.6, 0.25, 1.0);                            // thin out when far away
-    landCol = mix(landCol, RIVER * (0.8 + 0.2 * shade), a * 0.9);
-  }
+  // Rivers are drawn only on province borders (with the border lines below): in the game
+  // they run between provinces, never through one.
 
   // --- Water --------------------------------------------------------------------------
   float hb = texture(uHeight, uv).r * 255.0;
@@ -748,8 +740,9 @@ function landMask(map) {
 // Rivers in the game run along province borders; rivers.bmp has them a pixel or two to
 // one side. Finds each stretch of land province border that a river follows and marks
 // it (b: 1 + width) so the shader draws the river on the border line itself; those river
-// pixels are dropped from the coverage (r). Rivers away from borders stay as drawn.
-// A border counts when at least 40 % of it (4 px or more) is within 2 px of a river.
+// pixels are dropped from the coverage (r).
+// A border counts when at least half of it (6 px or more) is within 2 px of a river.
+// Only those are drawn: river pixels away from a province border are dropped.
 function riverTexture(map, rivers) {
   const W = map.width, H = map.height, n = W * H, ids = map.ids, src = rivers.data;
   const out = new Uint8Array(n * 4);
@@ -790,7 +783,7 @@ function riverTexture(map, rivers) {
   const edge = new Uint8Array(n);
   visit((i, j, k) => {
     const w = wet.get(k) || 0;
-    if (w < 4 || w < 0.4 * total.get(k)) return;
+    if (w < 6 || w < 0.5 * total.get(k)) return;
     const v = Math.max(near[i], near[j]);
     if (!v) return;
     edge[i] = Math.max(edge[i], v);

@@ -4,8 +4,11 @@
 // Heights (heightAt, set by the app) only move what is on the ground; the camera keeps the
 // sea-level plane as its reference.
 const FOV = (40 * Math.PI) / 180;     // vertical field of view
-const TILT_MAX = 0.8;                 // radians from straight down (~46 degrees)
-const TILT_FAR = 500, TILT_NEAR = 60; // camera heights where tilting starts and is complete
+// The game's tilt curve is compiled into the engine (the defines only give heights 50-3000).
+// As in the game, the map stays top-down for almost the whole zoom range and only tips
+// over in the last stretch before the closest zoom.
+const TILT_MAX = 0.6;                 // radians from straight down (~34 degrees)
+const TILT_FAR = 170, TILT_NEAR = 80; // camera heights where tilting starts and is complete
 
 // Camera with smoothing: input moves a target; the visible camera eases towards it
 // (exponential, zoom in log space so zooming feels even). Drags follow the pointer
