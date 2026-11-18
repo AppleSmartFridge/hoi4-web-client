@@ -8,7 +8,7 @@
 //           towards the interior; how far it fills depends on camera height, exactly as
 //           gradient_border_process_channel does it, including the darker inner edge
 //   water   water colour map at half brightness, the sea bed showing through in shallows,
-//           a flat reflection, the 20 % darkening, a soft shore taken from the height map
+//           a flat reflection, the 20 % darkening; the coast is a blurred land mask's contour
 //   lines   country, state, province, sea and wasteland borders drawn with the game's own
 //           border strip textures, fading by camera height like the defines say
 //
@@ -36,6 +36,7 @@ uniform sampler2D uField;     // distance to another owner, 1/8 px
 uniform sampler2D uColormap;  // terrain colour map (sRGB)
 uniform sampler2D uNormal;    // relief normals
 uniform sampler2D uHeight;    // height map (half res)
+uniform sampler2D uLand;      // land mask blurred (landMask below): the coastline is its 0.5 contour
 uniform sampler2D uWater;     // water colour map (sRGB)
 uniform sampler2D uUnder;     // sea-bed texture (sRGB, tiled)
 uniform sampler2D uRiver;     // rivers: coverage, width class
@@ -137,7 +138,14 @@ float stateEdge(vec2 m, float S, float scale) {
 // Province lines with rounder corners than resolve(): a cubic B-spline "same province"
 // field over 4x4 lattice points instead of a bilinear one over 2x2. Gives the two
 // provinces either side of the nearest boundary and the distance to it (device px).
-void resolveRound(vec2 m, float S, float scale, out int win, out int second, out float dpx) {
+// mode 0 keys texels by province id, mode 1 by owner (owner index + 1 on land, 0 for water),
+// which rounds coastlines and country shapes the same way. winId/secondId: a province of each.
+int roundKey(int id, int mode) {
+  if (mode == 0) return id;
+  uvec4 v = info(id);
+  return v.z == 1u ? int(v.y) + 1 : 0;
+}
+void resolveRound(vec2 m, float S, float scale, int mode, out int win, out int second, out int winId, out int secondId, out float dpx) {
   vec2 p = m / S - 0.5;
   vec2 i0 = floor(p), t = p - i0;
   vec4 wx, wy, dx, dy;
@@ -147,18 +155,19 @@ void resolveRound(vec2 m, float S, float scale, out int win, out int second, out
     vec4 d = vec4(-v * v, 3.0 * u * u - 4.0 * u, -3.0 * u * u + 2.0 * u + 1.0, u * u) / 2.0;
     if (a == 0) { wx = w; dx = d; } else { wy = w; dy = d; }
   }
-  int k[16];
+  int k[16], ids[16];
   float w[16];
   vec2 g[16];
   for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
     int n = j * 4 + i;
-    k[n] = idAt(ivec2((i0 + vec2(i - 1, j - 1) + 0.5) * S));
+    ids[n] = idAt(ivec2((i0 + vec2(i - 1, j - 1) + 0.5) * S));
+    k[n] = roundKey(ids[n], mode);
     w[n] = wx[i] * wy[j];
     g[n] = vec2(dx[i] * wy[j], wx[i] * dy[j]);
   }
   float bestF = -1.0, secondF = -1.0;
   vec2 bestG = vec2(0), secondG = vec2(0);
-  win = -1; second = -1;
+  win = -1; second = -1; winId = 0; secondId = 0;
   for (int a = 0; a < 16; a++) {
     bool seen = false;
     for (int b = 0; b < a; b++) if (k[b] == k[a]) seen = true;
@@ -167,14 +176,35 @@ void resolveRound(vec2 m, float S, float scale, out int win, out int second, out
     vec2 G = vec2(0);
     for (int b = a; b < 16; b++) if (k[b] == k[a]) { F += w[b]; G += g[b]; }
     if (F > bestF) {
-      second = win; secondF = bestF; secondG = bestG;
-      win = k[a]; bestF = F; bestG = G;
+      second = win; secondF = bestF; secondG = bestG; secondId = winId;
+      win = k[a]; bestF = F; bestG = G; winId = ids[a];
     } else if (F > secondF) {
-      second = k[a]; secondF = F; secondG = G;
+      second = k[a]; secondF = F; secondG = G; secondId = ids[a];
     }
   }
   if (second < 0) { dpx = 1e6; return; }
   dpx = (bestF - secondF) / max(length(bestG - secondG), 1e-4) * scale;
+}
+
+// Cubic B-spline sample of a single-channel texture from 4 bilinear taps: the gradient
+// band's edges come out round instead of following the pixel grid.
+vec4 bspline(float v) {
+  vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
+  vec4 s3 = n * n * n;
+  float x = s3.x, y = s3.y - 4.0 * s3.x, z = s3.z - 4.0 * s3.y + 6.0 * s3.x;
+  return vec4(x, y, z, 6.0 - x - y - z) / 6.0;
+}
+float textureBicubic(sampler2D tex, vec2 uv, vec2 size) {
+  vec2 tc = uv * size - 0.5;
+  vec2 fr = fract(tc);
+  tc -= fr;
+  vec4 xc = bspline(fr.x), yc = bspline(fr.y);
+  vec4 c = tc.xxyy + vec2(-0.5, 1.5).xyxy;
+  vec4 s4 = vec4(xc.xz + xc.yw, yc.xz + yc.yw);
+  vec4 o = (c + vec4(xc.yw, yc.yw) / s4) / size.xxyy;
+  float a = texture(tex, o.xz).r, b = texture(tex, o.yz).r, cc = texture(tex, o.xw).r, d = texture(tex, o.yw).r;
+  float sx = s4.x / (s4.x + s4.y), sy = s4.z / (s4.z + s4.w);
+  return mix(mix(d, cc, sx), mix(b, a, sx), sy);
 }
 
 // A border strip like the game's meshes: BORDER_WIDTH (1.5) map units wide, kept between
@@ -256,18 +286,23 @@ void main() {
     wk[i] = waste ? 1 : 0;                                 // wasteland or not
   }
   float scale = uZoom * S;
-  int ow, os, sw, ss, pw, ps, ww, ws;
+  int sw, ss, pw, ps, ww, ws;
   float od, sd, pd, wd;
-  resolve(ok[0], ok[1], ok[2], ok[3], f, scale, ow, os, od);
+  int okw, oks, owi, osi;
+  resolveRound(m, S, scale, 1, okw, oks, owi, osi, od);  // coastline and owners, rounded like the game's
   resolve(sk[0], sk[1], sk[2], sk[3], f, scale, sw, ss, sd);
   resolve(c[0], c[1], c[2], c[3], f, scale, pw, ps, pd);
   resolve(wk[0], wk[1], wk[2], wk[3], f, scale, ww, ws, wd);
-  uvec4 qi = q[ow];
-  bool land = qi.z == 1u;
+  uvec4 qi = info(owi);
+  bool land = okw != 0;
+  // The coastline is drawn from a blurred land mask (below), which is rounder than the
+  // province bitmap: sea it takes in is drawn as the land next to it.
+  bool rim = !land && oks > 0 && qi.z != 3u && qi.z != 1u;
+  if (rim) qi = info(osi);
   bool waste = land && (qi.w & 1u) != 0u;
   // Colours follow control: occupied land shows its occupier, as in the game.
   // Country lines (ok[]) stay on the owners' borders. Wasteland shows its holder too.
-  int owner = land ? int(qi.w >> 1u) : 0;
+  int owner = land || rim ? int(qi.w >> 1u) : 0;
 
   // --- Terrain ----------------------------------------------------------------------
   vec2 tuv = m / 16.0;  // TERRAIN_TILE_FREQ: a tile repeats every 16 map pixels
@@ -299,7 +334,7 @@ void main() {
 
   // --- Gradient borders over land ----------------------------------------------------
   float camDist = 1.0 - clamp(camDistance(100.0, 350.0), 0.0, 0.8);
-  float d = texture(uField, uv).r * 255.0 / 8.0;
+  float d = textureBicubic(uField, uv, uMap) * 255.0 / 8.0;
   vec3 ownerCol = vec3(0);
   float T = 25.0;
   if (owner > 0) {
@@ -341,17 +376,18 @@ void main() {
 
   // --- Water --------------------------------------------------------------------------
   float hb = texture(uHeight, uv).r * 255.0;
-  float shore = clamp((hb / 95.7 - 0.954) * 25.0, 0.0, 1.0);
+  float lm = textureBicubic(uLand, uv, uMap);
+  float shore = clamp((lm - 0.42) / max(fwidth(lm), 1e-4) + 0.5, 0.0, 1.0);  // antialiased; < half keeps islets their size
   vec3 col = landCol;
-  if (shore < 1.0 || !land) {
+  if (shore < 1.0 || !(land || rim)) {
     vec3 tint = texture(uWater, uv).rgb * 0.5;                 // WATER_COLOR_LIGHTNESS
     vec3 bed = texture(uUnder, m / 32.0).rgb * shade * 0.7;          // sea bed, tiled every 32 px
     float seen = clamp((hb / 10.0 - 5.3) / (13.0 - 5.3), 0.0, 1.0);
     vec3 water = mix(tint, bed, seen);
     water = mix(water, REFLECTION, 0.5);                       // fresnel, looking down
-    if (owner > 0) water = gradientBorder(water, ownerCol, d, T, camDist, GB_CUTOFF * 0.990, 0.0);
+    if (owner > 0 && land) water = gradientBorder(water, ownerCol, d, T, camDist, GB_CUTOFF * 0.990, 0.0);
     water *= 0.8;                                              // the game's darkness offset
-    float wa = land ? 1.0 - shore : 1.0;
+    float wa = land || rim ? 1.0 - shore : 1.0;
     col = mix(landCol, water, wa);
   }
 
@@ -360,9 +396,9 @@ void main() {
   float stateFade = 1.0 - smoothstep(400.0, 500.0, uCamH);  // STATE_BORDER_FADE_NEAR/FAR
   vec4 b;
   if (provFade > 0.0) {
-    int rw, rs;
+    int rw, rs, rwi, rsi;
     float rd;
-    resolveRound(m, S, scale, rw, rs, rd);
+    resolveRound(m, S, scale, 0, rw, rs, rwi, rsi, rd);
     if (rs >= 0) {
       uint tw = info(rw).z, ts = info(rs).z;
       if (tw == 1u && ts == 1u) {
@@ -385,7 +421,7 @@ void main() {
     b = strip(4.0, wd, 4.0 * uDpr, m);
     col = mix(col, b.rgb, b.a);
   }
-  if (os >= 0 && ok[ow] != 0 && ok[os] != 0) {
+  if (oks >= 0 && okw != 0 && oks != 0) {
     b = stripW(0.0, od, 1.5 * uDpr, 2.5 * uDpr, m);  // thinner than the game's 1.5 map units when zoomed in
     col = mix(col, b.rgb, b.a);
   }
@@ -397,9 +433,9 @@ void main() {
   outColor = vec4(toGamma(col), 1.0);
 }`;
 
-const UNIFORMS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uWater", "uUnder",
+const UNIFORMS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uLand", "uWater", "uUnder",
   "uRiver", "uAtlas", "uAtlasN", "uBorder", "uMap", "uView", "uCenter", "uZoom", "uDpr", "uCamH", "uHoverState", "uSelState", "uHoverProv"];
-const SAMPLERS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uWater", "uUnder",
+const SAMPLERS = ["uIds", "uProv", "uTerrain", "uColors", "uField", "uColormap", "uNormal", "uHeight", "uLand", "uWater", "uUnder",
   "uRiver", "uAtlas", "uAtlasN", "uBorder"];
 const BORDERS = ["border_country", "border_state", "border_province", "border_sea", "border_impassable"];
 
@@ -440,6 +476,7 @@ export class MapRenderer {
     T.uColormap = tex2d(gl, gl.SRGB8, L.colormap.w, L.colormap.h, gl.RGB, gl.UNSIGNED_BYTE, L.colormap.data, gl.LINEAR, gl.REPEAT);
     T.uNormal = tex2d(gl, gl.RGB8, L.normal.w, L.normal.h, gl.RGB, gl.UNSIGNED_BYTE, L.normal.data, gl.LINEAR, gl.REPEAT);
     T.uHeight = tex2d(gl, gl.R8, L.height.w, L.height.h, gl.RED, gl.UNSIGNED_BYTE, L.height.data, gl.LINEAR, gl.REPEAT);
+    T.uLand = tex2d(gl, gl.R8, map.width, map.height, gl.RED, gl.UNSIGNED_BYTE, landMask(map), gl.LINEAR, gl.REPEAT);
     T.uWater = tex2d(gl, gl.SRGB8_ALPHA8, L.water.w, L.water.h, gl.RGBA, gl.UNSIGNED_BYTE, L.water.data, gl.LINEAR, gl.REPEAT);
     T.uUnder = tex2d(gl, gl.SRGB8_ALPHA8, L.underwater.w, L.underwater.h, gl.RGBA, gl.UNSIGNED_BYTE, rgba(L.underwater.data), gl.LINEAR, gl.REPEAT, true);
     T.uRiver = tex2d(gl, gl.RG8, L.rivers.w, L.rivers.h, gl.RG, gl.UNSIGNED_BYTE, L.rivers.data, gl.LINEAR, gl.REPEAT);
@@ -572,5 +609,41 @@ function borderStrips(L) {
       }
     }
   });
+  return out;
+}
+
+// Land as 0/255 per map pixel, Gaussian-blurred (sigma 1.5 px): the shader draws the coast
+// where this crosses half, so corners of the province bitmap come out round, as the game's
+// height-map coastline does, and small islands become ovals instead of rounded squares.
+// Lakes count as land (their shores keep the province shape). About 0.3 s for the map.
+function landMask(map) {
+  const W = map.width, H = map.height, ids = map.ids, n = W * H;
+  const isLand = new Uint8Array(map.provinceCount);
+  for (let p = 0; p < map.provinceCount; p++) isLand[p] = map.type[p] === 1 || map.type[p] === 3 ? 1 : 0;
+  const K = [64, 51, 26, 9, 2];  // exp(-k^2 / 4.5) * 64; sum 240
+  const h = new Uint8Array(n);
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    for (let x = 0; x < W; x++) {
+      let v = 0;
+      for (let k = -4; k <= 4; k++) {
+        let xx = x + k;
+        if (xx < 0) xx += W; else if (xx >= W) xx -= W;  // the map wraps east-west
+        if (isLand[ids[row + xx]]) v += K[k < 0 ? -k : k];
+      }
+      h[row + x] = v;
+    }
+  }
+  const out = new Uint8Array(n);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let v = 0;
+      for (let k = -4; k <= 4; k++) {
+        const yy = Math.min(H - 1, Math.max(0, y + k));
+        v += h[yy * W + x] * K[k < 0 ? -k : k];
+      }
+      out[y * W + x] = Math.round(v * 255 / 57600);
+    }
+  }
   return out;
 }
