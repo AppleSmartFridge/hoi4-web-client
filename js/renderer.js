@@ -39,7 +39,7 @@ uniform sampler2D uHeight;    // height map (half res)
 uniform sampler2D uLand;      // land mask blurred (landMask below): the coastline is its 0.5 contour
 uniform sampler2D uWater;     // water colour map (sRGB)
 uniform sampler2D uUnder;     // sea-bed texture (sRGB, tiled)
-uniform sampler2D uRiver;     // rivers: coverage, width class
+uniform sampler2D uRiver;     // rivers: coverage, width class, river-on-border width (riverTexture)
 uniform sampler2DArray uAtlas;   // 16 terrain tiles (sRGB)
 uniform sampler2DArray uAtlasN;  // their normals
 uniform sampler2DArray uBorder;  // border strips: country, state, province, sea, wasteland
@@ -94,6 +94,11 @@ int tileAt(ivec2 t) {
   return v > 15 ? 9 : v;
 }
 uvec4 info(int id) { return texelFetch(uProv, ivec2(id & 255, id >> 8), 0); }
+float riverEdgeAt(ivec2 t) {
+  t.x = int(mod(float(t.x), uMap.x));
+  t.y = clamp(t.y, 0, int(uMap.y) - 1);
+  return texelFetch(uRiver, t, 0).b;
+}
 
 // One level of the 2x2 test: which corner wins, the runner-up corner, and the distance
 // (device px) to their boundary.
@@ -401,6 +406,25 @@ void main() {
           b = strip(2.0, rd, 2.5 * uDpr, m);
           col = mix(col, b.rgb, b.a * provFade);
         }
+        // A river along this province border: drawn on the border itself, as in the game.
+        // Both provinces must carry the mark near here, so a river doesn't spill onto the
+        // other borders at a junction.
+        ivec2 bp = ivec2(floor(m));
+        float ew = 0.0, es = 0.0;
+        for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+          ivec2 t = bp + ivec2(dx, dy);
+          int id = idAt(t);
+          float e = riverEdgeAt(t);
+          if (id == rw) ew = max(ew, e); else if (id == rs) es = max(es, e);
+        }
+        float re = min(ew, es) > 0.0 ? max(ew, es) : 0.0;
+        if (re > 0.0) {
+          float cls = (re * 255.0 - 1.0) / 28.0;                       // width class 0-9
+          float halfW = (0.28 + 0.07 * cls) * uZoom;
+          float a = 1.0 - smoothstep(max(halfW, 0.5) - 0.5, max(halfW, 0.5) + 0.5, rd);
+          a *= clamp(halfW * 1.6, 0.25, 1.0);
+          col = mix(col, RIVER * (0.8 + 0.2 * shade), a * 0.9);
+        }
       } else if (iw.z == 2u && is_.z == 2u) {
         // Sea-zone borders stay when zoomed out, as in the game.
         b = strip(3.0, rd, 1.5 * uDpr, m);
@@ -470,7 +494,7 @@ export class MapRenderer {
     T.uLand = tex2d(gl, gl.R8, map.width, map.height, gl.RED, gl.UNSIGNED_BYTE, landMask(map), gl.LINEAR, gl.REPEAT);
     T.uWater = tex2d(gl, gl.SRGB8_ALPHA8, L.water.w, L.water.h, gl.RGBA, gl.UNSIGNED_BYTE, L.water.data, gl.LINEAR, gl.REPEAT);
     T.uUnder = tex2d(gl, gl.SRGB8_ALPHA8, L.underwater.w, L.underwater.h, gl.RGBA, gl.UNSIGNED_BYTE, rgba(L.underwater.data), gl.LINEAR, gl.REPEAT, true);
-    T.uRiver = tex2d(gl, gl.RG8, L.rivers.w, L.rivers.h, gl.RG, gl.UNSIGNED_BYTE, L.rivers.data, gl.LINEAR, gl.REPEAT);
+    T.uRiver = tex2d(gl, gl.RGBA8, L.rivers.w, L.rivers.h, gl.RGBA, gl.UNSIGNED_BYTE, riverTexture(map, L.rivers), gl.LINEAR, gl.REPEAT);
     T.uAtlas = texArray(gl, gl.SRGB8_ALPHA8, L.atlas.w, L.atlas.h, L.atlas.layers, rgba(L.atlas.data), true);
     T.uAtlasN = texArray(gl, gl.RGBA8, L.atlas_normal.w, L.atlas_normal.h, L.atlas_normal.layers, rgba(L.atlas_normal.data), true);
     T.uBorder = texArray(gl, gl.RGBA8, 128, 64, BORDERS.length, borderStrips(L), false);
@@ -669,6 +693,73 @@ function landMask(map) {
   for (let i = 0; i < n; i++) {
     const c = comp[i];
     if (c >= 0 && peaks[c] < 160) out[i] = Math.min(255, Math.round(out[i] * 160 / Math.max(peaks[c], 1)));
+  }
+  return out;
+}
+
+// Rivers in the game run along province borders; rivers.bmp has them a pixel or two to
+// one side. Finds each stretch of land province border that a river follows and marks
+// it (b: 1 + width) so the shader draws the river on the border line itself; those river
+// pixels are dropped from the coverage (r). Rivers away from borders stay as drawn.
+// A border counts when at least 40 % of it (4 px or more) is within 2 px of a river.
+function riverTexture(map, rivers) {
+  const W = map.width, H = map.height, n = W * H, ids = map.ids, src = rivers.data;
+  const out = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) { out[i * 4] = src[i * 2]; out[i * 4 + 1] = src[i * 2 + 1]; out[i * 4 + 3] = 255; }
+  // River presence (1 + width) spread 2 px in each direction.
+  const tmp = new Uint8Array(n), near = new Uint8Array(n);
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    for (let x = 0; x < W; x++) {
+      let v = 0;
+      for (let k = -2; k <= 2; k++) {
+        const xx = (x + k + W) % W, j = row + xx;
+        if (src[j * 2]) v = Math.max(v, 1 + src[j * 2 + 1]);
+      }
+      tmp[row + x] = v;
+    }
+  }
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let v = 0;
+    for (let k = -2; k <= 2; k++) { const yy = y + k; if (yy >= 0 && yy < H) v = Math.max(v, tmp[yy * W + x]); }
+    near[y * W + x] = v;
+  }
+  const land = (id) => map.type[id] === 1;
+  const total = new Map(), wet = new Map();
+  const pairKey = (a, b) => (a < b ? a * 65536 + b : b * 65536 + a);
+  const visit = (fn) => {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, a = ids[i];
+      if (!land(a)) continue;
+      if (x < W - 1) { const j = i + 1, b = ids[j]; if (b !== a && land(b)) fn(i, j, pairKey(a, b)); }
+      if (y < H - 1) { const j = i + W, b = ids[j]; if (b !== a && land(b)) fn(i, j, pairKey(a, b)); }
+    }
+  };
+  visit((i, j, k) => {
+    total.set(k, (total.get(k) || 0) + 1);
+    if (near[i] || near[j]) wet.set(k, (wet.get(k) || 0) + 1);
+  });
+  const edge = new Uint8Array(n);
+  visit((i, j, k) => {
+    const w = wet.get(k) || 0;
+    if (w < 4 || w < 0.4 * total.get(k)) return;
+    const v = Math.max(near[i], near[j]);
+    if (!v) return;
+    edge[i] = Math.max(edge[i], v);
+    edge[j] = Math.max(edge[j], v);
+  });
+  // Drop river pixels within 2 px of a marked border; mark the border in b.
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (edge[i]) out[i * 4 + 2] = Math.min(255, edge[i]);
+    if (!src[i * 2]) continue;
+    let snapped = false;
+    for (let dy = -2; dy <= 2 && !snapped; dy++) {
+      const yy = y + dy;
+      if (yy < 0 || yy >= H) continue;
+      for (let dx = -2; dx <= 2; dx++) if (edge[yy * W + (x + dx + W) % W]) { snapped = true; break; }
+    }
+    if (snapped) out[i * 4] = 0;
   }
   return out;
 }
