@@ -17,7 +17,8 @@ export class Camera {
 
   // Equivalent of the game's camera height (50 close ... 3000 far) for the fades the game
   // keys to it: border fades, gradient-border fill, when country names show.
-  get height() { return (0.85 * this.view.h) / this.zoom; }
+  // Calibrated against the game: a view of Europe there is past the province-line fade.
+  get height() { return (1.25 * this.view.h) / this.zoom; }
 
   get minZoom() { return Math.max(this.view.h / this.H, 0.05); }
 

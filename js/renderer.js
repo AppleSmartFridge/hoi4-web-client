@@ -60,6 +60,9 @@ const float GB_CUTOFF = 0.973;                    // GRADIENT_BORDERS_OUTLINE_CU
 const float DESATURATE = 0.85;                    // terrain hue removed under country colours
 const vec3 REFLECTION = vec3(0.03, 0.065, 0.13);   // stands in for the sky cube map
 const vec3 SKY_EDGE = vec3(0.02, 0.025, 0.035);
+const vec3 SEA_HAZE = vec3(0.10, 0.13, 0.21);      // the game's sea reads as a hazy grey-blue
+const vec3 SHALLOW = vec3(0.22, 0.42, 0.52);       // light rim of shallow water along coasts
+const float LAND_DARKEN = 0.86;                    // the game's land is darker than the raw atlas
 const vec3 RIVER = vec3(0.035, 0.085, 0.16);
 
 vec3 toGamma(vec3 c) { return pow(max(c, 0.0), vec3(1.0 / 2.2)); }
@@ -241,7 +244,7 @@ vec3 gradientBorder(vec3 base, vec3 owner, float d, float T, float camDist, floa
     // the game's borders read (its 9-tap sampling pulls the edge texels under the cutoff).
     outline = outlineMult;
     fill = 0.0;
-    float w = max(0.75, 1.5 / max(uZoom, 1e-3));                   // map px, at least ~1.5 device px
+    float w = max(0.75, 3.0 / max(uZoom, 1e-3));                   // map px, at least ~3 device px
     thick = outlineMult * (1.0 - clamp((d - w) * uZoom + 0.5, 0.0, 1.0));  // antialiased over a device px
   } else {
     float v = 1.0 - a / cutoff;
@@ -342,6 +345,9 @@ void main() {
   if (owner > 0) {
     vec4 oc = texelFetch(uColors, ivec2(owner, 0), 0);
     ownerCol = toLinear(oc.rgb);
+    // The game's political colours read muted and darker than the raw country colours
+    // (its post-processing and haze); take some saturation and light out.
+    ownerCol = mix(vec3(dot(ownerCol, vec3(0.2126, 0.7152, 0.0722))), ownerCol, 0.72) * 0.78;
     T = oc.a * 255.0;  // 5-25 map px by country size, as in the game
   }
   vec3 landCol = diffuse;
@@ -352,11 +358,14 @@ void main() {
     fillStrength = clamp(length(tinted - before) / max(length(ownerCol - before), 1e-3), 0.0, 1.0);
     // The atlas and colour map are warm; under a country colour that reads as a yellow cast.
     // Where the colour is applied, keep the terrain's light and dark but drop most of its hue.
-    landCol = mix(landCol, vec3(dot(landCol, vec3(0.2126, 0.7152, 0.0722))), DESATURATE * fillStrength);
+    // Bright terrain (snow, sand) would show through as white blotches: flatten its
+    // brightness too, so the relief comes from the lighting below, as in the game.
+    float lum = dot(landCol, vec3(0.2126, 0.7152, 0.0722));
+    landCol = mix(landCol, vec3(mix(lum, 0.16, 0.6)), DESATURATE * fillStrength);
     landCol = gradientBorder(landCol, ownerCol, d, T, camDist, GB_CUTOFF, 1.0);
   }
   // The game lights less where the border colour is strong (BORDER_LIGHT_REMOVAL_FACTOR).
-  landCol *= mix(shade, 1.0, 0.8 * fillStrength);
+  landCol *= mix(shade, 1.0, 0.45 * fillStrength) * LAND_DARKEN;
 
   // Hover and selection.
   int st = land ? int(q[sw].x) : -1;
@@ -387,6 +396,11 @@ void main() {
     water = mix(water, REFLECTION, 0.5);                       // fresnel, looking down
     if (owner > 0 && land) water = gradientBorder(water, ownerCol, d, T, camDist, GB_CUTOFF * 0.990, 0.0);
     water *= 0.8;                                              // the game's darkness offset
+    water = mix(water, SEA_HAZE, 0.35);
+    // Shallows by the coast: the height map's shelf (open sea floor is 89) and the last
+    // pixels before the coastline.
+    float shelf = max(smoothstep(0.0, 0.42, lm), 0.8 * smoothstep(89.5, 94.5, hb) * smoothstep(250.0, 500.0, uCamH));  // shelf only from afar: patchy up close
+    water = mix(water, SHALLOW, 0.6 * shelf);
     float wa = land || rim ? 1.0 - shore : 1.0;
     col = mix(landCol, water, wa);
   }
@@ -404,10 +418,17 @@ void main() {
       if (tw == 1u && ts == 1u) {
         b = strip(2.0, rd, 2.5 * uDpr, m);
         col = mix(col, b.rgb, b.a * provFade);
-      } else if (tw == 2u && ts == 2u) {
-        b = strip(3.0, rd, 3.0 * uDpr, m);
-        col = mix(col, b.rgb, b.a * provFade * 0.6);
       }
+    }
+  }
+  {
+    // Sea-zone borders stay when zoomed out, as in the game.
+    int rw, rs, rwi, rsi;
+    float rd;
+    resolveRound(m, S, scale, 0, rw, rs, rwi, rsi, rd);
+    if (rs >= 0 && info(rw).z == 2u && info(rs).z == 2u) {
+      b = strip(3.0, rd, 1.5 * uDpr, m);
+      col = mix(col, b.rgb, b.a * 0.55);
     }
   }
   if (stateFade > 0.0) {
