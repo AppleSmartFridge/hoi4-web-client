@@ -737,70 +737,47 @@ function landMask(map) {
   return out;
 }
 
-// Rivers in the game run along province borders; rivers.bmp has them a pixel or two to
-// one side. Finds each stretch of land province border that a river follows and marks
-// it (b: 1 + width) so the shader draws the river on the border line itself; those river
-// pixels are dropped from the coverage (r).
-// A border counts when at least half of it (6 px or more) is within 2 px of a river.
-// Only those are drawn: river pixels away from a province border are dropped.
+// Rivers in the game run between provinces; rivers.bmp has them a pixel or two to one
+// side of the border. Each river pixel marks the nearest piece of land province border
+// (within 2 px) in b (1 + width), and the shader draws the river on the border line
+// itself, so the river keeps its whole course but lies between the provinces. River pixels
+// with no border nearby are dropped (r = 0): rivers never run through a province.
 function riverTexture(map, rivers) {
   const W = map.width, H = map.height, n = W * H, ids = map.ids, src = rivers.data;
   const out = new Uint8Array(n * 4);
-  for (let i = 0; i < n; i++) { out[i * 4] = src[i * 2]; out[i * 4 + 1] = src[i * 2 + 1]; out[i * 4 + 3] = 255; }
-  // River presence (1 + width) spread 2 px in each direction.
-  const tmp = new Uint8Array(n), near = new Uint8Array(n);
-  for (let y = 0; y < H; y++) {
-    const row = y * W;
-    for (let x = 0; x < W; x++) {
-      let v = 0;
-      for (let k = -2; k <= 2; k++) {
-        const xx = (x + k + W) % W, j = row + xx;
-        if (src[j * 2]) v = Math.max(v, 1 + src[j * 2 + 1]);
-      }
-      tmp[row + x] = v;
-    }
-  }
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    let v = 0;
-    for (let k = -2; k <= 2; k++) { const yy = y + k; if (yy >= 0 && yy < H) v = Math.max(v, tmp[yy * W + x]); }
-    near[y * W + x] = v;
-  }
+  for (let i = 0; i < n; i++) { out[i * 4 + 1] = src[i * 2 + 1]; out[i * 4 + 3] = 255; }
   const land = (id) => map.type[id] === 1;
-  const total = new Map(), wet = new Map();
-  const pairKey = (a, b) => (a < b ? a * 65536 + b : b * 65536 + a);
-  const visit = (fn) => {
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x, a = ids[i];
-      if (!land(a)) continue;
-      if (x < W - 1) { const j = i + 1, b = ids[j]; if (b !== a && land(b)) fn(i, j, pairKey(a, b)); }
-      if (y < H - 1) { const j = i + W, b = ids[j]; if (b !== a && land(b)) fn(i, j, pairKey(a, b)); }
-    }
-  };
-  visit((i, j, k) => {
-    total.set(k, (total.get(k) || 0) + 1);
-    if (near[i] || near[j]) wet.set(k, (wet.get(k) || 0) + 1);
-  });
-  const edge = new Uint8Array(n);
-  visit((i, j, k) => {
-    const w = wet.get(k) || 0;
-    if (w < 6 || w < 0.5 * total.get(k)) return;
-    const v = Math.max(near[i], near[j]);
-    if (!v) return;
-    edge[i] = Math.max(edge[i], v);
-    edge[j] = Math.max(edge[j], v);
-  });
-  // Drop river pixels within 2 px of a marked border; mark the border in b.
+  // Candidate edges around a river pixel, nearest first: (dx, dy) of a pixel and the
+  // direction to its right (0) or lower (1) neighbour. Distance is to the edge midpoint.
+  const cands = [];
+  for (let dy = -3; dy <= 2; dy++) for (let dx = -3; dx <= 2; dx++) for (let dir = 0; dir < 2; dir++) {
+    const mx = dx + (dir === 0 ? 0.5 : 0), my = dy + (dir === 1 ? 0.5 : 0);
+    const dist = Math.hypot(mx, my);
+    if (dist <= 2.3) cands.push([dx, dy, dir, dist]);
+  }
+  cands.sort((a, b) => a[3] - b[3]);
+  const marks = [], count = new Map();  // [a, b, pair, v]; edges per province pair
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = y * W + x;
-    if (edge[i]) out[i * 4 + 2] = Math.min(255, edge[i]);
-    if (!src[i * 2]) continue;
-    let snapped = false;
-    for (let dy = -2; dy <= 2 && !snapped; dy++) {
-      const yy = y + dy;
-      if (yy < 0 || yy >= H) continue;
-      for (let dx = -2; dx <= 2; dx++) if (edge[yy * W + (x + dx + W) % W]) { snapped = true; break; }
+    const r = y * W + x;
+    if (!src[r * 2]) continue;
+    const v = Math.min(255, 1 + src[r * 2 + 1]);
+    for (const [dx, dy, dir] of cands) {
+      const py = y + dy, qy = py + dir;
+      if (py < 0 || qy >= H) continue;
+      const px = (x + dx + W) % W, qx = (px + (dir === 0 ? 1 : 0)) % W;
+      const a = py * W + px, b = qy * W + qx, ia = ids[a], ib = ids[b];
+      if (ia === ib || !land(ia) || !land(ib)) continue;
+      const pair = ia < ib ? ia * 65536 + ib : ib * 65536 + ia;
+      marks.push([a, b, pair, v]);
+      count.set(pair, (count.get(pair) || 0) + 1);
+      break;
     }
-    if (snapped) out[i * 4] = 0;
+  }
+  // A border only one or two river pixels landed on is a junction stray, not the river.
+  for (const [a, b, pair, v] of marks) {
+    if (count.get(pair) < 3) continue;
+    out[a * 4 + 2] = Math.max(out[a * 4 + 2], v);
+    out[b * 4 + 2] = Math.max(out[b * 4 + 2], v);
   }
   return out;
 }
