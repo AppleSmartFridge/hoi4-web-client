@@ -103,13 +103,15 @@ async function main() {
     const province = map.provinceAt(m.x, m.y);
     if (!province) return null;
     const stateId = map.stateOf[province];
-    return { province, state: stateId ? map.states.get(stateId) : null, owner: map.ownerOfProvince(province), type: map.type[province] };
+    return { province, state: stateId ? map.states.get(stateId) : null, owner: map.ownerOfProvince(province), controller: map.controllerOfProvince(province), type: map.type[province] };
   }
   function showTooltip(p, h) {
     if (!h || controls.drag) { tooltip.hidden = true; return; }
     let html;
     if (h.type === LAND) {
-      const owner = h.owner ? `<span class="sw" style="background:${rgb(h.owner.color)}"></span>${esc(h.owner.name)}` : "Unowned";
+      let owner = h.owner ? `<span class="sw" style="background:${rgb(h.owner.color)}"></span>${esc(h.owner.name)}` : "Unowned";
+      if (h.controller && h.controller !== h.owner)
+        owner += `<br><span class="sw" style="background:${rgb(h.controller.color)}"></span>Occupied by ${esc(h.controller.name)}`;
       html = `<b>${esc(h.state ? h.state.name : "Province")}</b><br>${owner}<br><span class="sub">Province ${h.province}${h.state ? ` · state ${h.state.id}` : ""}</span>`;
     } else {
       html = `<b>${h.type === LAKE ? "Lake" : "Sea"}</b><br><span class="sub">Province ${h.province}</span>`;
@@ -150,6 +152,13 @@ async function main() {
       ["State", `#${s.id}${s.category ? ` · ${s.category.replace(/_/g, " ")}` : ""}`],
       ["Provinces", land],
     ];
+    // Who holds it: the state's controller, and any provinces held by someone else.
+    const held = new Map();
+    for (const p of s.provinces) {
+      const k = map.type[p] === LAND ? map.controllerOfProvince(p) : null;
+      if (k && k !== owner) held.set(k, (held.get(k) || 0) + 1);
+    }
+    for (const [k, n] of held) facts.push(["Occupied by", `${k.name} (${n === land ? "all" : `${n} of ${land} provinces`})`]);
     if (s.impassable) facts.push(["Terrain", "Impassable"]);
     if (s.startOwner && s.startOwner !== s.owner) facts.push(["In 1936", map.countries.get(s.startOwner)?.name || s.startOwner]);
     $("stateFacts").innerHTML = facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
@@ -192,9 +201,15 @@ async function main() {
     $("date").textContent = state.date ? formatDate(state.date) : "";
     if (state.country?.tag) $("linkText").textContent = `Live · ${state.country.tag}`;
     if (changed.includes("states") && state.states && Array.isArray(state.states.owner)) {
-      const owners = new Map();
+      const owners = new Map(), controllers = new Map();
       state.states.owner.forEach((tag, id) => { if (id > 0) owners.set(id, tag); });
-      if (map.setOwners(owners)) { dirty = true; renderStatePanel(); }
+      if (Array.isArray(state.states.controller))
+        state.states.controller.forEach((tag, id) => { if (id > 0) controllers.set(id, tag); });
+      if (map.setOwners(owners, controllers)) { dirty = true; renderStatePanel(); }
+    }
+    // Provinces held by someone other than their state's controller (front lines).
+    if (changed.includes("provinces") && state.provinces && typeof state.provinces === "object") {
+      if (map.setProvinceControl(state.provinces.controller)) { dirty = true; renderStatePanel(); }
     }
     // Cosmetic tags and ruling ideologies: names and colours as the game shows them.
     if (changed.includes("countries") && state.countries && typeof state.countries === "object") {

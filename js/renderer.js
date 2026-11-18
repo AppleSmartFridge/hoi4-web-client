@@ -29,7 +29,7 @@ precision highp usampler2D;
 precision highp sampler2DArray;
 
 uniform usampler2D uIds;      // province id per map pixel
-uniform usampler2D uProv;     // per province: state, owner, type, flags (256 wide)
+uniform usampler2D uProv;     // per province: state, owner, type, flags | controller << 1 (256 wide)
 uniform usampler2D uTerrain;  // atlas tile per map pixel (255 = water)
 uniform sampler2D uColors;    // per owner: rgb (sRGB) + band thickness in a (1024 x 1)
 uniform sampler2D uField;     // distance to another owner, 1/8 px
@@ -134,25 +134,72 @@ float stateEdge(vec2 m, float S, float scale) {
   return best * scale;
 }
 
-// A border strip like the game's meshes: BORDER_WIDTH (1.5) map units wide, never thinner
-// than minPx device pixels, sampled across from its texture.
-vec4 strip(float layer, float dpx, float minPx, vec2 m) {
-  float w = max(1.5 * uZoom, minPx);
+// Province lines with rounder corners than resolve(): a cubic B-spline "same province"
+// field over 4x4 lattice points instead of a bilinear one over 2x2. Gives the two
+// provinces either side of the nearest boundary and the distance to it (device px).
+void resolveRound(vec2 m, float S, float scale, out int win, out int second, out float dpx) {
+  vec2 p = m / S - 0.5;
+  vec2 i0 = floor(p), t = p - i0;
+  vec4 wx, wy, dx, dy;
+  for (int a = 0; a < 2; a++) {
+    float u = a == 0 ? t.x : t.y, v = 1.0 - u;
+    vec4 w = vec4(v * v * v, 3.0 * u * u * u - 6.0 * u * u + 4.0, -3.0 * u * u * u + 3.0 * u * u + 3.0 * u + 1.0, u * u * u) / 6.0;
+    vec4 d = vec4(-v * v, 3.0 * u * u - 4.0 * u, -3.0 * u * u + 2.0 * u + 1.0, u * u) / 2.0;
+    if (a == 0) { wx = w; dx = d; } else { wy = w; dy = d; }
+  }
+  int k[16];
+  float w[16];
+  vec2 g[16];
+  for (int j = 0; j < 4; j++) for (int i = 0; i < 4; i++) {
+    int n = j * 4 + i;
+    k[n] = idAt(ivec2((i0 + vec2(i - 1, j - 1) + 0.5) * S));
+    w[n] = wx[i] * wy[j];
+    g[n] = vec2(dx[i] * wy[j], wx[i] * dy[j]);
+  }
+  float bestF = -1.0, secondF = -1.0;
+  vec2 bestG = vec2(0), secondG = vec2(0);
+  win = -1; second = -1;
+  for (int a = 0; a < 16; a++) {
+    bool seen = false;
+    for (int b = 0; b < a; b++) if (k[b] == k[a]) seen = true;
+    if (seen) continue;
+    float F = 0.0;
+    vec2 G = vec2(0);
+    for (int b = a; b < 16; b++) if (k[b] == k[a]) { F += w[b]; G += g[b]; }
+    if (F > bestF) {
+      second = win; secondF = bestF; secondG = bestG;
+      win = k[a]; bestF = F; bestG = G;
+    } else if (F > secondF) {
+      second = k[a]; secondF = F; secondG = G;
+    }
+  }
+  if (second < 0) { dpx = 1e6; return; }
+  dpx = (bestF - secondF) / max(length(bestG - secondG), 1e-4) * scale;
+}
+
+// A border strip like the game's meshes: BORDER_WIDTH (1.5) map units wide, kept between
+// minPx and maxPx device pixels, sampled across from its texture.
+vec4 stripW(float layer, float dpx, float minPx, float maxPx, vec2 m) {
+  float w = clamp(1.5 * uZoom, minPx, maxPx);
   float across = 0.5 + dpx / w;
   if (across >= 1.0) return vec4(0);
   vec4 c = texture(uBorder, vec3((m.x + m.y) * 0.4 / 1.5, across, layer));
   c.rgb = toLinear(c.rgb);
   return c;
 }
+vec4 strip(float layer, float dpx, float minPx, vec2 m) { return stripW(layer, dpx, minPx, 1e4, m); }
 
 float camDistance(float lo, float hi) { return (clamp(uCamH, lo, hi) - lo) / (hi - lo); }
 
 // The game's gradient-border texture value at distance d (map px) from the owner's edge:
 // 255, 254, 253 over the first two pixels (GRADIENT_BORDERS_COUNTRY_CENTER_THICKNESS), then
 // falling from below the outline cutoff to 0 across the band thickness T.
+// The solid edge band is kept to about 2.5 device px so country edges don't get heavy
+// when zoomed in (in the game it scales with the map).
 float gbAlpha(float d, float T) {
-  if (d < 2.0) return (255.0 - d) / 255.0;
-  return 247.0 / 255.0 * clamp(1.0 - (d - 2.0) / max(T - 2.0, 1.0), 0.0, 1.0);
+  float c = min(2.0, 2.5 * uDpr / max(uZoom, 1e-3));
+  if (d < c) return (255.0 - 2.0 * d / c) / 255.0;
+  return 247.0 / 255.0 * clamp(1.0 - (d - c) / max(T - c, 1.0), 0.0, 1.0);
 }
 
 // gradient_border_process_channel() for one owner. Returns the colour mix and writes the
@@ -218,7 +265,9 @@ void main() {
   uvec4 qi = q[ow];
   bool land = qi.z == 1u;
   bool waste = land && (qi.w & 1u) != 0u;
-  int owner = land ? int(qi.y) : 0;  // wasteland shows its owner too, over darker ground
+  // Colours follow control: occupied land shows its occupier, as in the game.
+  // Country lines (ok[]) stay on the owners' borders. Wasteland shows its holder too.
+  int owner = land ? int(qi.w >> 1u) : 0;
 
   // --- Terrain ----------------------------------------------------------------------
   vec2 tuv = m / 16.0;  // TERRAIN_TILE_FREQ: a tile repeats every 16 map pixels
@@ -256,7 +305,9 @@ void main() {
   if (owner > 0) {
     vec4 oc = texelFetch(uColors, ivec2(owner, 0), 0);
     ownerCol = toLinear(oc.rgb);
-    T = oc.a * 255.0;
+    // The band is 5-25 map px in the game, which gets heavy zoomed in: keep it within
+    // about 20 device px there.
+    T = min(oc.a * 255.0, max(3.0, 20.0 * uDpr / max(uZoom, 1e-3)));
   }
   vec3 landCol = diffuse;
   float fillStrength = 0.0;
@@ -307,16 +358,20 @@ void main() {
   // --- Border lines ---------------------------------------------------------------------
   float provFade = 1.0 - smoothstep(200.0, 300.0, uCamH);   // PROVINCE_BORDER_FADE_NEAR/FAR
   float stateFade = 1.0 - smoothstep(400.0, 500.0, uCamH);  // STATE_BORDER_FADE_NEAR/FAR
-  bool otherLand = ps >= 0 && q[ps].z == 1u;
-  bool otherSea = ps >= 0 && q[ps].z == 2u;
   vec4 b;
-  if (ps >= 0 && provFade > 0.0) {
-    if (land && otherLand) {
-      b = strip(2.0, pd, 2.5 * uDpr, m);
-      col = mix(col, b.rgb, b.a * provFade);
-    } else if (!land && qi.z == 2u && otherSea) {
-      b = strip(3.0, pd, 3.0 * uDpr, m);
-      col = mix(col, b.rgb, b.a * provFade * 0.6);
+  if (provFade > 0.0) {
+    int rw, rs;
+    float rd;
+    resolveRound(m, S, scale, rw, rs, rd);
+    if (rs >= 0) {
+      uint tw = info(rw).z, ts = info(rs).z;
+      if (tw == 1u && ts == 1u) {
+        b = strip(2.0, rd, 2.5 * uDpr, m);
+        col = mix(col, b.rgb, b.a * provFade);
+      } else if (tw == 2u && ts == 2u) {
+        b = strip(3.0, rd, 3.0 * uDpr, m);
+        col = mix(col, b.rgb, b.a * provFade * 0.6);
+      }
     }
   }
   if (stateFade > 0.0) {
@@ -331,7 +386,7 @@ void main() {
     col = mix(col, b.rgb, b.a);
   }
   if (os >= 0 && ok[ow] != 0 && ok[os] != 0) {
-    b = strip(0.0, od, 2.5 * uDpr, m);  // was 4 px: read too heavy next to the game
+    b = stripW(0.0, od, 1.5 * uDpr, 2.5 * uDpr, m);  // thinner than the game's 1.5 map units when zoomed in
     col = mix(col, b.rgb, b.a);
   }
   // Selected state outline on top.
@@ -410,7 +465,7 @@ export class MapRenderer {
       d[p * 4] = s;
       d[p * 4 + 1] = map.provinceOwner[p];
       d[p * 4 + 2] = map.type[p];
-      d[p * 4 + 3] = st && st.impassable ? 1 : 0;
+      d[p * 4 + 3] = (st && st.impassable ? 1 : 0) | (map.provinceController[p] << 1);
     }
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.tex.uProv);

@@ -78,7 +78,9 @@ export class MapModel {
     this.countryList = [null];
     for (const [tag, c] of Object.entries(meta.countries)) this.addCountry(tag, c);
 
-    this.provinceOwner = new Uint16Array(n);  // country index per province
+    this.provinceOwner = new Uint16Array(n);       // country index per province
+    this.provinceController = new Uint16Array(n);  // who holds it: the owner unless occupied
+    this.provinceControl = new Map();              // province -> controller tag, from the game (overrides the state's)
     this.applyOwners();
   }
 
@@ -126,8 +128,9 @@ export class MapModel {
     return changed;
   }
 
-  // owners: Map(stateId -> tag or null). Returns true when anything changed.
-  setOwners(owners) {
+  // owners / controllers: Map(stateId -> tag or null); controllers may be null (then each
+  // state is held by its owner). Returns true when anything changed.
+  setOwners(owners, controllers = null) {
     let changed = false;
     for (const [id, tag] of owners) {
       const s = this.states.get(id);
@@ -135,15 +138,41 @@ export class MapModel {
       const t = tag == null ? null : String(tag);
       if (s.owner !== t) { s.owner = t; changed = true; }
     }
+    for (const [id, tag] of controllers || []) {
+      const s = this.states.get(id);
+      if (!s) continue;
+      const t = tag == null ? null : String(tag);
+      if ((s.controller ?? null) !== t) { s.controller = t; changed = true; }
+    }
     if (changed) this.applyOwners();
     return changed;
   }
 
+  // control: {province id: controller tag} for provinces held by someone other than their
+  // state's controller (protocol state key `provinces`). Replaces the previous set.
+  setProvinceControl(control) {
+    const next = new Map();
+    for (const [p, tag] of Object.entries(control || {})) if (tag != null) next.set(Number(p), String(tag));
+    if (next.size === this.provinceControl.size && [...next].every(([p, t]) => this.provinceControl.get(p) === t)) return false;
+    this.provinceControl = next;
+    this.applyOwners();
+    return true;
+  }
+
   applyOwners() {
     this.provinceOwner.fill(0);
+    this.provinceController.fill(0);
     for (const s of this.states.values()) {
       const c = s.owner ? this.addCountry(s.owner) : null;
-      for (const p of s.provinces) if (p < this.provinceCount) this.provinceOwner[p] = c ? c.index : 0;
+      const k = s.controller && s.controller !== s.owner ? this.addCountry(s.controller) : c;
+      for (const p of s.provinces) {
+        if (p >= this.provinceCount) continue;
+        this.provinceOwner[p] = c ? c.index : 0;
+        this.provinceController[p] = k ? k.index : 0;
+      }
+    }
+    for (const [p, tag] of this.provinceControl) {
+      if (p > 0 && p < this.provinceCount && this.provinceOwner[p]) this.provinceController[p] = this.addCountry(tag).index;
     }
     this.version = (this.version || 0) + 1;
   }
@@ -155,6 +184,7 @@ export class MapModel {
   }
 
   ownerOfProvince(p) { return this.countryList[this.provinceOwner[p]] || null; }
+  controllerOfProvince(p) { return this.countryList[this.provinceController[p]] || null; }
 
   // Label geometry for every contiguous land area of each country (big enough to name).
   countryLabels() {
@@ -284,7 +314,8 @@ export function borderField(map) {
   const keyOf = new Uint16Array(map.provinceCount);
   const area = new Float64Array(map.countryList.length);
   for (let p = 0; p < map.provinceCount; p++) {
-    const o = map.type[p] === LAND ? map.provinceOwner[p] : 0;  // wasteland included: it has an owner too
+    // Bands follow control, like the colours: occupied land gets its occupier's band.
+    const o = map.type[p] === LAND ? map.provinceController[p] : 0;  // wasteland included: it has an owner too
     keyOf[p] = o;
     if (o) area[o] += map.size[p];
   }
