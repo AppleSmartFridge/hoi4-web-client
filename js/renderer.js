@@ -349,7 +349,8 @@ void main() {
   if (c[pw] == uHoverProv && uCamH < 300.0 && land) landCol = mix(landCol, vec3(1.0), 0.06);
 
   // Rivers: rivers.bmp lines, smoothed by linear filtering, wider for bigger rivers.
-  vec2 rv = texture(uRiver, uv).rg;
+  // Coverage sampled with a B-spline so wide rivers up close are smooth, not blocky.
+  vec2 rv = vec2(textureBicubic(uRiver, uv, uMap), texture(uRiver, uv).g);
   if (rv.r > 0.02 && land) {
     float halfW = (0.28 + 0.07 * rv.g * 9.0) * uZoom;            // device px
     float dpx = (1.0 - rv.r) * uZoom;                              // distance from the line
@@ -605,7 +606,7 @@ function borderStrips(L) {
 // Land as 0/255 per map pixel, Gaussian-blurred (sigma 1.5 px): the shader draws the coast
 // where this crosses half, so corners of the province bitmap come out round, as the game's
 // height-map coastline does, and small islands become ovals instead of rounded squares.
-// Lakes count as land (their shores keep the province shape). About 0.3 s for the map.
+// Lakes count as land (their shores keep the province shape). About 0.7 s for the map.
 function landMask(map) {
   const W = map.width, H = map.height, ids = map.ids, n = W * H;
   const isLand = new Uint8Array(map.provinceCount);
@@ -632,8 +633,42 @@ function landMask(map) {
         const yy = Math.min(H - 1, Math.max(0, y + k));
         v += h[yy * W + x] * K[k < 0 ? -k : k];
       }
-      out[y * W + x] = Math.round(v * 255 / 57600);
+      const i = y * W + x, o = Math.round(v * 255 / 57600);
+      // Sea stays sea: the blur may round land off (islands, capes) but never close a
+      // narrow strait or fjord (the Limfjord is 1-3 px wide). Kept under the 0.42 contour.
+      out[i] = isLand[ids[i]] ? o : Math.min(o, 77);
     }
+  }
+  // Tiny islands blur below the contour and would vanish: lift each piece of land whose
+  // peak is low so it stays as a small rounded blob.
+  const land = new Uint8Array(n);
+  for (let i = 0; i < n; i++) land[i] = isLand[ids[i]];
+  const comp = new Int32Array(n).fill(-1), stack = new Int32Array(n);
+  const peaks = [];
+  for (let s = 0; s < n; s++) {
+    if (comp[s] >= 0 || !land[s]) continue;
+    const c = peaks.length;
+    let top = 0, peak = 0;
+    stack[top++] = s;
+    comp[s] = c;
+    while (top) {
+      const i = stack[--top];
+      if (out[i] > peak) peak = out[i];
+      const x = i % W;
+      let j = x > 0 ? i - 1 : i + W - 1;
+      if (land[j] && comp[j] < 0) { comp[j] = c; stack[top++] = j; }
+      j = x < W - 1 ? i + 1 : i - W + 1;
+      if (land[j] && comp[j] < 0) { comp[j] = c; stack[top++] = j; }
+      j = i - W;
+      if (j >= 0 && land[j] && comp[j] < 0) { comp[j] = c; stack[top++] = j; }
+      j = i + W;
+      if (j < n && land[j] && comp[j] < 0) { comp[j] = c; stack[top++] = j; }
+    }
+    peaks.push(peak);
+  }
+  for (let i = 0; i < n; i++) {
+    const c = comp[i];
+    if (c >= 0 && peaks[c] < 160) out[i] = Math.min(255, Math.round(out[i] * 160 / Math.max(peaks[c], 1)));
   }
   return out;
 }
