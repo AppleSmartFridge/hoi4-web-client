@@ -19,6 +19,8 @@ This repository holds only the page (HTML, CSS and JavaScript). It contains **no
    ```
    and give friends `wss://<pc-name>.<tailnet>.ts.net` plus the token. Only people on your tailnet can reach it.
 
+The first time you connect, Chrome and Edge ask whether this site may access devices on your local network: choose **Allow**. If you refused it once, allow it again from the icon left of the address bar → Site settings → Local network access.
+
 The token controls your game: share it like a password. To revoke it, delete the `token` line in `config.json` and restart the game.
 
 ## Source

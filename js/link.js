@@ -90,7 +90,8 @@ export class Link extends EventTarget {
     }
     this.ws = ws;
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => ws.send(JSON.stringify({ type: "hello", token: this.token, client: "hoi4link web" }));
+    let opened = false;
+    ws.onopen = () => (opened = true) && ws.send(JSON.stringify({ type: "hello", token: this.token, client: "hoi4link web" }));
     ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) {
         const w = this.binaryWait.shift();
@@ -113,10 +114,15 @@ export class Link extends EventTarget {
         this.authFailed = true;
       }
     };
-    ws.onclose = (ev) => {
+    ws.onclose = async (ev) => {
       if (this.ws !== ws) return;
       this.ws = null;
       this.failPending("closed", "connection closed");
+      if (!opened && this.wanted && await localNetworkBlocked()) {
+        this.wanted = false;
+        this.setStatus("error", "Your browser is blocking this page from reaching the game. Allow \"Local network access\" for this site (the icon left of the address bar → Site settings), then connect again.");
+        return;
+      }
       const auth = { 4001: "The token was refused.", 4002: "No hello in time.", 4003: "Locked out for a minute after bad tokens." }[ev.code];
       if (auth || this.authFailed) {
         this.authFailed = false;
@@ -131,4 +137,14 @@ export class Link extends EventTarget {
     };
     ws.onerror = () => {};
   }
+}
+
+// Chrome asks before a public site (GitHub Pages) may reach this PC or the local network
+// (Tailscale's 100.x addresses count); once refused, connections fail silently.
+async function localNetworkBlocked() {
+  if (!navigator.permissions) return false;
+  for (const name of ["local-network-access", "loopback-network", "local-network"]) {
+    try { if ((await navigator.permissions.query({ name })).state === "denied") return true; } catch { /* unknown name */ }
+  }
+  return false;
 }
