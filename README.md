@@ -2,6 +2,8 @@
 
 A browser map for a Hearts of Iron IV game running **hoi4link**: the political map with live borders, country names, cosmetic tags and the in-game date, straight from the game.
 
+**Open it:** https://applesmartfridge.github.io/hoi4-web-client/
+
 ## How it works
 This repository holds only the page (HTML, CSS and JavaScript). It contains **no game files and no map data**. The map is built from the host's own HOI4 install and stays on the host's PC; after you sign in with the token, hoi4link sends it over the connection and your browser caches it.
 
